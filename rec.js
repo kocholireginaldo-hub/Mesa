@@ -38,8 +38,10 @@
   R.startCapture = async () => {
     if (R.state !== 'idle') return;
     if (R.hasAudio() && !(R.confirmOverwrite ? R.confirmOverwrite() : true)) { R.msg = 'Gravação cancelada: as faixas atuais foram mantidas.'; return; } // proteção contra sobrescrita acidental
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: R.inId ? { exact: R.inId } : undefined, channelCount: { ideal: 18 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: SR } });
-    const st = stream.getAudioTracks()[0].getSettings(), n = Math.min(MAXTR, st.channelCount || 2);
+    let stream = null; const base = { deviceId: R.inId ? { exact: R.inId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: SR };
+    for (const c of [18, 16, 8, 4, 2]) { try { stream = await navigator.mediaDevices.getUserMedia({ audio: { ...base, channelCount: { exact: c } } }); break; } catch (e) { if (e.name === 'NotAllowedError' || e.name === 'NotFoundError') throw e; } } // tenta 18 canais "exatos" antes de aceitar menos
+    if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio: { ...base, channelCount: { ideal: 18 } } });
+    const st = stream.getAudioTracks()[0].getSettings(), n = Math.min(MAXTR, st.channelCount || 2); R.inChannels = n;
     const ctx = new AudioContext({ sampleRate: SR, latencyHint: 'interactive' }); await ctx.resume();
     const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })); await ctx.audioWorklet.addModule(url);
     const src = ctx.createMediaStreamSource(stream); src.channelCount = n; src.channelCountMode = 'explicit'; src.channelInterpretation = 'discrete';
@@ -82,13 +84,14 @@
      CORREÇÃO DE LATÊNCIA: antes, o ganho (fader/mute/solo) era "gravado" em cada bloco no momento em que ele era agendado
      (até 3 s à frente), então qualquer mudança só era ouvida depois que a fila agendada acabava. Agora cada faixa tem UM
      GainNode persistente DEPOIS da fila (fila -> GainNode da faixa -> mix). Mudar o ganho afeta também o áudio já agendado. */
+  R.effUsb = false;
   R.perf = { faderToGainMs: null, estAudibleMs: null, oscRttMs: null, updates: 0 };
   R.trackGain = i => {
     const t = R.tracks[i], solo = R.tracks.some(x => x.solo);
-    if (t.mute || (solo && !t.solo)) return 0;
+    if (!t.frames || t.mute || (solo && !t.solo)) return 0;
     let g = t.gain;
-    if (R.mode !== 'usb') { // monitor local: fader/mute da mesa valem aqui; no modo USB quem aplica é a própria mesa
-      const id = R.stripId(i); if (store.get(id + '/mix/on', true) === false) return 0;
+    if (!R.effUsb) { // monitor local: fader/mute da mesa valem aqui; no modo USB quem aplica é a própria mesa
+      const id = R.stripId(i); // (mute/OFF da mesa NÃO é aplicado aqui, como no original: use o botão M da faixa)
       const d = store.get(id + '/mix/fader', 0); g *= isFinite(d) ? Math.pow(10, d / 20) : 0;
     }
     return g;
@@ -105,16 +108,20 @@
   R.play = async () => {
     if (R.state === 'rec' || !R.hasAudio()) return; if (R.state === 'play') await R.stopPlay();
     const ctx = new AudioContext({ sampleRate: SR, latencyHint: 'interactive' }); // buffer de saída pequeno; o agendamento à frente é só da fila
-    let nOut = 2, merger = null, master = null;
-    if (R.mode === 'usb') {
+    let nOut = 2, merger = null, master = null; R.warn = '';
+    const need = R.tracks.reduce((m, t, i) => (t.frames ? i + 1 : m), 0); // maior número de faixa com áudio
+    let usb = R.mode === 'usb';
+    if (usb) {
       if (R.outId && ctx.setSinkId) { try { await ctx.setSinkId(R.outId); } catch (e) { R.msg = 'Não consegui selecionar a saída USB: ' + e.message; } }
-      nOut = Math.min(MAXTR, ctx.destination.maxChannelCount || 2); ctx.destination.channelCount = nOut; ctx.destination.channelInterpretation = 'discrete';
-      merger = ctx.createChannelMerger(nOut); merger.connect(ctx.destination);
-      if (nOut < 16) R.msg = `A saída só expõe ${nOut} canais; retorno multicanal limitado (veja README).`;
-    } else { master = ctx.createGain(); master.connect(ctx.destination); }
-    const ana = [], chain = [], pans = R.mode === 'usb' ? null : [];
+      const max = ctx.destination.maxChannelCount || 2;
+      if (max < need) { // antes, as faixas acima do nº de canais da saída ficavam MUDAS (ex.: só 1 e 2 em saída estéreo). Agora toca o mix estéreo de todas.
+        usb = false; R.warn = `A saída escolhida expõe só ${max} canais e há áudio até a faixa ${need}. Tocando o MIX ESTÉREO de todas as faixas (nada vai aos retornos USB da mesa). Para retorno multicanal escolha o dispositivo XR18 em "Saída/Retorno" e configure 18 canais nas propriedades de som do Windows.`;
+      } else { nOut = Math.min(MAXTR, max); ctx.destination.channelCount = nOut; ctx.destination.channelInterpretation = 'discrete'; merger = ctx.createChannelMerger(nOut); merger.connect(ctx.destination); }
+    }
+    R.effUsb = usb; if (!usb) { master = ctx.createGain(); master.connect(ctx.destination); }
+    const ana = [], chain = [], pans = usb ? null : [];
     R.tracks.forEach((t, i) => { const g = ctx.createGain(), a = ctx.createAnalyser(); a.fftSize = 4096; g.gain.value = R.trackGain(i); g.connect(a); ana.push(a);
-      if (R.mode === 'usb') { if (i < nOut) g.connect(merger, 0, i); }
+      if (usb) { if (i < nOut) g.connect(merger, 0, i); }
       else { const p = ctx.createStereoPanner(); g.connect(p); p.connect(master); pans.push(p); }
       chain.push(g); });
     const start = ctx.currentTime + 0.15, from = R.pos, total = R.totalFrames(), CH = SR / 2; let sf = from;
@@ -134,7 +141,7 @@
     };
     L.timer = setInterval(pump, 120); pump();
   };
-  R.stopPlay = async () => { if (R.live && R.live.kind === 'play') { clearInterval(R.live.timer); try { await R.live.ctx.close(); } catch (e) {} R.live = null; } R.state = 'idle'; };
+  R.stopPlay = async () => { R.warn = ''; if (R.live && R.live.kind === 'play') { clearInterval(R.live.timer); try { await R.live.ctx.close(); } catch (e) {} R.live = null; } R.state = 'idle'; };
   R.pause = async () => { const p = R.pos; await R.stopPlay(); R.pos = p; };
   R.seek = f => { R.pos = Math.max(0, Math.min(R.totalFrames(), f | 0)); if (R.state === 'play') { R.stopPlay().then(R.play); } };
 
@@ -145,9 +152,21 @@
   };
 
   /* ---------- importar / exportar ---------- */
-  R.importFiles = async files => {
+  /* ---------- remover / importar faixa individual ---------- */
+  R.removeTrack = i => {
+    const t = R.tracks[i]; if (!t || !t.frames) return;
+    R.lastRemoved = { i, name: t.name, chunks: t.chunks, frames: t.frames, peaks: t.peaks, mute: t.mute, solo: t.solo };
+    t.chunks = []; t.frames = 0; t.peaks = []; t.name = ''; t.saved = 0; t.segN = 0; t.level = -90;
+    R.updateGains(); R.msg = `Faixa ${i + 1} removida. Use "Desfazer remoção" se foi sem querer.`;
+  };
+  R.undoRemove = () => { const u = R.lastRemoved; if (!u) return; const t = R.tracks[u.i]; if (t.frames && !confirm('A faixa já tem outro áudio. Substituir?')) return; Object.assign(t, { chunks: u.chunks, frames: u.frames, peaks: u.peaks, name: u.name }); R.lastRemoved = null; R.updateGains(); R.msg = `Faixa ${u.i + 1} restaurada.`; };
+  R.importToTrack = async (i, file) => {
+    if (R.state === 'rec') { R.msg = 'Pare a gravação antes de importar.'; return; }
+    await R.importFiles([file], i); R.updateGains();
+  };
+  R.importFiles = async (files, startSlot) => {
     const ctx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 1, SR);
-    let slot = R.tracks.findIndex(t => !t.frames); if (slot < 0) slot = 0;
+    let slot = startSlot !== undefined ? startSlot : R.tracks.findIndex(t => !t.frames); if (slot < 0) slot = 0;
     for (const f of files) {
       const ab = await f.arrayBuffer(); const buf = await ctx.decodeAudioData(ab);
       for (let c = 0; c < buf.numberOfChannels && slot < MAXTR; c++, slot++) {
@@ -158,7 +177,7 @@
         t.name = f.name.replace(/\.[^.]+$/, '') + (buf.numberOfChannels > 1 ? ' ' + (c + 1) : '');
       }
     }
-    R.msg = 'Arquivos importados.';
+    R.msg = startSlot !== undefined ? `Importado a partir da faixa ${startSlot + 1}.` : 'Arquivos importados.';
   };
   const resample = (d, a, b) => { const n = Math.floor(d.length * b / a), o = new Float32Array(n); for (let i = 0; i < n; i++) { const p = i * a / b, k = p | 0, fr = p - k; o[i] = d[k] * (1 - fr) + (d[k + 1] || 0) * fr; } return o; };
   const wavHeader = (nch, frames) => { const b = new ArrayBuffer(44), v = new DataView(b), w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0))); const dl = frames * nch * 2;
@@ -238,10 +257,10 @@
     </div>
     <div class="rrow">
       <label class="tg file">Importar áudio… <input id="rimp" type="file" accept="audio/*" multiple hidden></label>
-      <button id="rexp" class="tg">Exportar WAV multicanal</button><button id="rexp2" class="tg">Exportar 1 WAV por canal</button><button id="rsyn" class="tg">Gerar sinais de teste</button><button id="rclr" class="tg">Limpar</button>
+      <button id="rexp" class="tg">Exportar WAV multicanal</button><button id="rexp2" class="tg">Exportar 1 WAV por canal</button><button id="rsyn" class="tg">Gerar sinais de teste</button><button id="rclr" class="tg">Limpar</button><button id="rundo" class="tg" hidden>Desfazer remoção</button>
       <button id="rret" class="tg">Ativar retorno nos canais (rtnsw ON)</button><button id="rret0" class="tg">Voltar entradas analógicas</button><button id="rrec2" class="tg" hidden>Recuperar última gravação</button>
     </div>
-    <div class="na" id="rperf"></div>
+    <div class="na" id="rwarn" style="color:#e8a020"></div><div class="na" id="rperf"></div>
     <div id="rtracks"></div>`;
     c.append(root);
     const q = s => root.querySelector(s);
@@ -252,7 +271,7 @@
     q('#rrec').onclick = () => R.startCapture().catch(e => (R.msg = 'Erro ao gravar: ' + e.message));
     q('#rstop').onclick = () => R.stop(); q('#rplay').onclick = () => R.play(); q('#rpause').onclick = () => R.pause(); q('#rrew').onclick = () => { R.seek(0); };
     q('#rimp').onchange = e => R.importFiles([...e.target.files]).catch(err => (R.msg = 'Falha ao importar: ' + err.message));
-    q('#rexp').onclick = R.exportMulti; q('#rexp2').onclick = R.exportEach; q('#rsyn').onclick = () => R.synth(); q('#rclr').onclick = () => { R.stop(); R.clear(); };
+    q('#rexp').onclick = R.exportMulti; q('#rexp2').onclick = R.exportEach; q('#rsyn').onclick = () => R.synth(); q('#rclr').onclick = () => { if (R.hasAudio() && !confirm('Apagar TODAS as faixas da sessão?')) return; R.stop(); R.clear(); }; q('#rundo').onclick = R.undoRemove;
     q('#rrec2').onclick = async () => { const ok = await R.recover(); if (!ok) R.msg = 'Nada para recuperar.'; };
     if (XR.storage) XR.storage.recMetaGet().then(m => { if (m && m.frames && !R.hasAudio()) { q('#rrec2').hidden = false; q('#rrec2').textContent = `Recuperar última gravação (${fmtT(m.frames).slice(0, 5)} min)`; } }).catch(() => {});
     q('#rret').onclick = () => R.routeReturns(true); q('#rret0').onclick = () => R.routeReturns(false);
@@ -264,7 +283,12 @@
       const arm = bt('R', 'red on', () => (t.arm = !t.arm)), mu = bt('M', '', () => { t.mute = !t.mute; R.updateGains(); }), so = bt('S', 'yel', () => { t.solo = !t.solo; R.updateGains(); });
       const cv = el('canvas', 'wf'); cv.width = WCV; cv.height = 34; cv.onclick = e => { const r = cv.getBoundingClientRect(); R.seek(((e.clientX - r.left) / r.width) * Math.max(R.totalFrames(), SR * 10)); };
       const vu = el('div', 'vu'); vu.append(el('i')); cvs.push({ cv, vu: vu.firstChild, t });
-      row.append(nm, arm, mu, so, cv, vu); list.append(row);
+      const fi = el('input'); fi.type = 'file'; fi.accept = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a'; fi.hidden = true; fi.onchange = () => { if (fi.files[0]) R.importToTrack(i, fi.files[0]).catch(err => (R.msg = 'Falha ao importar: ' + err.message)); fi.value = ''; };
+      const imp = el('button', 'tb', '📁'); imp.title = 'Carregar um arquivo de áudio nesta faixa'; imp.onclick = () => fi.click();
+      const del = el('button', 'tb del', '✕'); del.title = 'Remover o áudio desta faixa'; del.onclick = () => R.removeTrack(i);
+      row.ondragover = e => { e.preventDefault(); row.classList.add('drop'); }; row.ondragleave = () => row.classList.remove('drop');
+      row.ondrop = e => { e.preventDefault(); row.classList.remove('drop'); const f = e.dataTransfer.files[0]; if (f) R.importToTrack(i, f).catch(err => (R.msg = 'Falha ao importar: ' + err.message)); };
+      row.append(nm, arm, mu, so, imp, del, fi, cv, vu); list.append(row);
     });
     const draw = () => {
       const total = Math.max(R.totalFrames(), SR * 10), bins = total / PEAK_BIN;
@@ -273,7 +297,7 @@
         const px = (R.pos / total) * w; g.fillStyle = '#ff4040'; g.fillRect(px, 0, 1.5, h);
         vu.style.width = Math.max(0, Math.min(100, (t.level + 60) / 60 * 100)) + '%'; });
       const P = R.perf, N = XR.perf || {}; q('#rperf').textContent = `Latência (medida): fader→ganho local ${P.faderToGainMs ?? '–'} ms · percepção estimada ${P.estAudibleMs ?? '–'} ms · OSC→eco da mesa ${N.oscRttMs ?? '–'} ms`;
-      q('#rtime').textContent = fmtT(R.pos); q('#rlen').textContent = '/ ' + fmtT(R.totalFrames()); q('#rmsg').textContent = R.msg;
+      q('#rtime').textContent = fmtT(R.pos); q('#rlen').textContent = '/ ' + fmtT(R.totalFrames()); q('#rmsg').textContent = R.msg; q('#rwarn').textContent = R.warn || (R.inChannels && R.inChannels < 16 && R.state === 'rec' ? `Entrada expõe só ${R.inChannels} canais: só as faixas 1–${R.inChannels} recebem áudio.` : ''); q('#rundo').hidden = !R.lastRemoved; cvs.forEach(({ t }, k) => { const d = list.children[k] && list.children[k].querySelector('.del'); if (d) d.disabled = !t.frames; });
       q('#rrec').classList.toggle('on', R.state === 'rec'); q('#rplay').classList.toggle('on', R.state === 'play');
     };
     S.ups.push(draw); S.recDraw = draw; R.rec_end = draw; draw();

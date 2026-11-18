@@ -20,6 +20,9 @@ Sem Node.js o `iniciar-pc.bat` abre o `index.html` em modo demo (sem mesa e sem 
 ### No celular/tablet (controle pela rede local, sem internet)
 Deixe o PC rodando o servidor e abra no navegador do celular `http://IP-DO-PC:8080` (ex.: `http://192.168.0.20:8080`), mesma rede Wi-Fi da mesa. O celular usa a ponte do PC. Em *Setup*, troque `localhost` no campo "Ponte" pelo IP do PC.
 
+## Gravador: faixas
+Cada faixa tem **R** (armar), **M** (mudo), **S** (solo), **📁** (carregar um arquivo de áudio nesta faixa; também dá para arrastar o arquivo sobre a faixa) e **✕** (remover o áudio da faixa; há **Desfazer remoção**). Se a saída escolhida tiver menos canais que as faixas (ex.: saída estéreo do PC), o app toca o **mix estéreo de todas as faixas** e avisa em laranja — antes só as 2 primeiras eram ouvidas. Retorno multicanal para a mesa exige um dispositivo de saída com 18 canais.
+
 ## Indicadores de modo (barra superior)
 **MODO DEMO** (simulador) · **MESA CONECTADA** · **MESA DESCONECTADA** · **ERRO DE COMUNICAÇÃO** (inclui "sem resposta da mesa há 15 s").
 

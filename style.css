@@ -142,3 +142,6 @@ body.compact #app{zoom:.85}
   .trk-row .tn{width:84px}
 }
 @media (max-width:900px) and (orientation:landscape){#strips{height:clamp(200px,52dvh,300px);flex-basis:clamp(200px,52dvh,300px)}}
+
+.tb.del{color:#f66}.tb:disabled{opacity:.3;cursor:default}.trk-row.drop{outline:2px dashed var(--cy)}
+@media (max-width:900px){.tb{width:34px;height:34px}}
